@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"mini-project/internal/model"
 	"mini-project/internal/repository"
 	"os"
@@ -137,7 +138,7 @@ func (s *UserServiceImpl) DeductCredit(ctx context.Context, id string, amount fl
 }
 
 func (s *UserServiceImpl) Transfer(ctx context.Context, senderId string, receiverId string, amount float64) error {
-		if senderId == receiverId {
+	if senderId == receiverId {
 		return errors.New("Cannot transfer money to yourself")
 	}
 	if amount <= 0 {
@@ -145,20 +146,20 @@ func (s *UserServiceImpl) Transfer(ctx context.Context, senderId string, receive
 	}
 
 	sender, errS := s.userRepo.GetUserByID(ctx, senderId)
+	if errS != nil {
+		return errors.New("sender not found: " + errS.Error())
+	}
+
 	_, errR := s.userRepo.GetUserByID(ctx, receiverId)
 	if errR != nil {
-		return errR
-	}
-	if errS != nil {
-		return errS
+		return errors.New("receiver not found: " + errR.Error())
 	}
 
 	if sender.Credit < amount {
-		return errors.New("Sender does not have sufficient balance")
+		return errors.New("insufficient funds: sender has " + fmt.Sprintf("%.2f", sender.Credit) + " but trying to transfer " + fmt.Sprintf("%.2f", amount))
 	}
 
 	return s.userRepo.Transfer(ctx, senderId, receiverId, amount)
-	
 }
 
 func (s *UserServiceImpl) GetAll(ctx context.Context) ([]model.User, error) {

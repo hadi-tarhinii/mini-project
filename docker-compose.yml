@@ -3,7 +3,7 @@ services:
     image: mongo:latest
     container_name: mongodb_mini_project
     ports:
-      - "27017:27017"
+      - "27016:27017"
     volumes:
       - mongo_data:/data/db
     command: ["--replSet", "rs0", "--bind_ip_all"]

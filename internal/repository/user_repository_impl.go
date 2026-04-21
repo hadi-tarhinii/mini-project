@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -53,7 +54,7 @@ func (r *UserRepositoryImpl) DeleteUser(ctx context.Context, id string) error {
 
 // Credit
 func (r *UserRepositoryImpl) AddCredit(ctx context.Context, id string, amount float64) error {
-	
+
 	// convert string ID to mongo objID
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -113,46 +114,93 @@ func (r *UserRepositoryImpl) DeductCredit(ctx context.Context, id string, amount
 }
 
 func (r *UserRepositoryImpl) Transfer(ctx context.Context, senderId string, receiverId string, amount float64) error {
-    // 1. Start a Session for Atomicity
-    session, err := r.collection.Database().Client().StartSession()
-    if err != nil {
-        return err
-    }
-    defer session.EndSession(ctx)
+	// 0. Prevent self-transfers (A crucial business logic check!)
+	if senderId == receiverId {
+		return errors.New("cannot transfer funds to yourself")
+	}
 
-    // 2. Wrap everything in a Transaction
-    _, err = session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
-        objSender, _ := primitive.ObjectIDFromHex(senderId)
-        objReceiver, _ := primitive.ObjectIDFromHex(receiverId)
+	// 1. Validate ObjectIDs (Don't use `_` here. If a bad ID slips in, it crashes MongoDB)
+	objSender, err := primitive.ObjectIDFromHex(senderId)
+	if err != nil {
+		return errors.New("invalid sender ID format")
+	}
 
-        // Step A: Deduct with balance check
-        res, err := r.collection.UpdateOne(sessCtx, 
-            bson.M{"_id": objSender, "credit": bson.M{"$gte": amount}}, 
-            bson.M{"$inc": bson.M{"credit": -amount}},
-        )
-        if err != nil || res.MatchedCount == 0 {
-            return nil, errors.New("insufficient funds or sender not found")
-        }
+	objReceiver, err := primitive.ObjectIDFromHex(receiverId)
+	if err != nil {
+		return errors.New("invalid receiver ID format")
+	}
 
-        // Step B: Add to receiver
-        res, err = r.collection.UpdateOne(sessCtx, 
-            bson.M{"_id": objReceiver}, 
-            bson.M{"$inc": bson.M{"credit": amount}},
-        )
-        if err != nil || res.MatchedCount == 0 {
-            // This triggers a ROLLBACK - sender gets their money back!
-            return nil, errors.New("receiver not found")
-        }
+	// 2. Start a Session for Atomicity
+	session, err := r.collection.Database().Client().StartSession()
+	if err != nil {
+		return fmt.Errorf("failed to start session: %v", err)
+	}
+	defer session.EndSession(ctx)
 
-        return nil, nil
-    })
+	// 3. Wrap everything in a Transaction
+	_, err = session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
 
-    if err == nil {
-        r.ClearCache(ctx, senderId)
-        r.ClearCache(ctx, receiverId)
-    }
-    return err
+		// Step A: Deduct with balance check
+		res, err := r.collection.UpdateOne(sessCtx,
+			bson.M{"_id": objSender, "credit": bson.M{"$gte": amount}},
+			bson.M{"$inc": bson.M{"credit": -amount}},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("database error during deduction: %v", err)
+		}
+		if res.MatchedCount == 0 {
+			// Because Auth passed, if we hit this, it almost 100% means
+			// the balance is too low, not that the ID is completely fake.
+			return nil, errors.New("insufficient funds or account deactivated")
+		}
+
+		// Step B: Add to receiver
+		res, err = r.collection.UpdateOne(sessCtx,
+			bson.M{"_id": objReceiver},
+			bson.M{"$inc": bson.M{"credit": amount}},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("database error during addition: %v", err)
+		}
+		if res.MatchedCount == 0 {
+			// This triggers a ROLLBACK - sender gets their money back automatically!
+			return nil, errors.New("receiver not found")
+		}
+
+		return nil, nil
+	})
+
+	// 4. Cache Invalidation & Event Publishing
+	if err == nil {
+		// Run cache clearing and event publishing in a goroutine so it doesn't block the HTTP response
+		// Use context.Background() because the request `ctx` will die as soon as the HTTP response is sent
+		go func() {
+			bgCtx := context.Background()
+			r.ClearCache(bgCtx, senderId)
+			r.ClearCache(bgCtx, receiverId)
+
+			// Publish a transaction event to Redis Pub/Sub
+			transaction := map[string]interface{}{
+				"type":        "transfer",
+				"sender_id":   senderId,
+				"receiver_id": receiverId,
+				"amount":      amount,
+				"timestamp":   time.Now().Format(time.RFC3339),
+			}
+
+			payload, _ := json.Marshal(transaction)
+			err := r.redisClient.Publish(bgCtx, "transactions", string(payload)).Err()
+			if err != nil {
+				log.Printf("⚠️  Failed to publish transaction event: %v", err)
+			} else {
+				log.Printf("✅ Transaction published: %s -> %s, Amount: %.2f", senderId, receiverId, amount)
+			}
+		}()
+	}
+
+	return err
 }
+
 // Read
 func (r *UserRepositoryImpl) GetAll(ctx context.Context) ([]model.User, error) {
 	cursor, err := r.collection.Find(ctx, bson.M{})
@@ -181,7 +229,7 @@ func (r *UserRepositoryImpl) GetUserByID(ctx context.Context, id string) (model.
 
 		user = model.User{
 			ID:       objID,
-			Username: data["username"],	
+			Username: data["username"],
 			Email:    data["email"],
 			Credit:   balance,
 		}
@@ -202,10 +250,10 @@ func (r *UserRepositoryImpl) GetUserByID(ctx context.Context, id string) (model.
 		return user, err
 	}
 	err = r.redisClient.HSet(ctx, key, map[string]interface{}{
-		"id": user.ID.Hex(),
+		"id":       user.ID.Hex(),
 		"username": user.Username,
-		"email": user.Email,
-		"credit": user.Credit,
+		"email":    user.Email,
+		"credit":   user.Credit,
 	}).Err()
 
 	if err != nil {
@@ -216,7 +264,7 @@ func (r *UserRepositoryImpl) GetUserByID(ctx context.Context, id string) (model.
 	return user, nil
 }
 
-func (r *UserRepositoryImpl) GetByUsername(ctx context.Context, username string)(model.User, error){
+func (r *UserRepositoryImpl) GetByUsername(ctx context.Context, username string) (model.User, error) {
 	key := "user_name:" + username
 	var user model.User
 
@@ -229,7 +277,7 @@ func (r *UserRepositoryImpl) GetByUsername(ctx context.Context, username string)
 
 		user = model.User{
 			ID:       objID,
-			Username: data["username"],	
+			Username: data["username"],
 			Email:    data["email"],
 			Password: data["password"],
 			Credit:   balance,
@@ -246,11 +294,11 @@ func (r *UserRepositoryImpl) GetByUsername(ctx context.Context, username string)
 		return user, err
 	}
 	err = r.redisClient.HSet(ctx, key, map[string]interface{}{
-		"id": user.ID.Hex(),
+		"id":       user.ID.Hex(),
 		"username": user.Username,
-		"email": user.Email,
+		"email":    user.Email,
 		"password": user.Password,
-		"credit": user.Credit,
+		"credit":   user.Credit,
 	}).Err()
 
 	if err != nil {
@@ -270,7 +318,7 @@ func (r *UserRepositoryImpl) GetCreditByID(ctx context.Context, id string) (floa
 }
 
 // Clear cache
-func (r *UserRepositoryImpl) ClearCache(ctx context.Context, id string){
+func (r *UserRepositoryImpl) ClearCache(ctx context.Context, id string) {
 	key := "user:" + id
 	err := r.redisClient.Del(ctx, key).Err()
 	if err != nil {

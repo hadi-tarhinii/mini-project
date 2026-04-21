@@ -202,7 +202,7 @@ func (h *UserHandler) DeductCredit(w http.ResponseWriter, r *http.Request) {
 // POST/users/{id}/transfer
 func (h *UserHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 	// Get the sender ID from the context (set by Middleware)
-	senderId, ok := r.Context().Value("id").(string)
+	senderId, ok := r.Context().Value("user_id").(string)
 	if !ok {
 		utils.WriteError(w, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -230,13 +230,16 @@ func (h *UserHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		// Log the real error for you to see in the terminal
-		log.Printf("Transfer Error: %v", err)
+		log.Printf("Transfer Error - Sender: %s, Receiver: %s, Amount: %v, Error: %v", senderId, req.ReceiverId, req.Amount, err)
 
 		// Return a specific message to the user
-		if err.Error() == "insufficient funds" || err.Error() == "receiver not found" {
-			utils.WriteError(w, http.StatusBadRequest, err.Error())
+		errMsg := err.Error()
+		if errMsg == "insufficient funds or sender not found" || errMsg == "receiver not found" {
+			utils.WriteError(w, http.StatusBadRequest, errMsg)
+		} else if errMsg == "Cannot transfer money to yourself" || errMsg == "amount must be greater than 0" {
+			utils.WriteError(w, http.StatusBadRequest, errMsg)
 		} else {
-			utils.WriteError(w, http.StatusInternalServerError, "An internal error occurred during transfer")
+			utils.WriteError(w, http.StatusInternalServerError, "An internal error occurred during transfer: "+errMsg)
 		}
 		return
 	}
