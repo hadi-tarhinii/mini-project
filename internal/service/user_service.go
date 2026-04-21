@@ -5,11 +5,20 @@ import (
 	"errors"
 	"mini-project/internal/model"
 	"mini-project/internal/repository"
+	"os"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type UserService interface {
+	// Authentication
+	Login(ctx context.Context, username string, password string) (string, error)
+
 	// Create
 	CreateUser(ctx context.Context, user *model.User) error
 
@@ -37,11 +46,64 @@ func NewUserService(userRepo repository.UserRepository) UserService {
 	}
 }
 
+// A secret key should ideally come from an Environment Variable
+var jwtKey = []byte(os.Getenv("JWT_SECRET"))
+
+type Claims struct {
+	UserID string `json:"user_id"`
+	jwt.RegisteredClaims
+}
+
+func (s *UserServiceImpl) generateToken(userID string) (string, error) {
+	// 1. Set the expiration time (e.g., 24 hours)
+	expirationTime := time.Now().Add(24 * time.Hour)
+
+	// 2. Create the claims (the data inside the token)
+	claims := &Claims{
+		UserID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
+	}
+
+	// 3. Declare the token with the algorithm and claims
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// 4. Create the JWT string using our secret key
+	tokenString, err := token.SignedString(jwtKey)
+	if err != nil {
+		return "", err
+	}
+
+	return tokenString, nil
+}
+
+func (s *UserServiceImpl) Login(ctx context.Context, username string, password string) (string, error){
+	user, err := s.userRepo.GetByUsername(ctx, username)
+	if err != nil {
+		return "", errors.New("invalid credentials")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+		return "", errors.New("wrong password")
+	}
+
+	return  s.generateToken(user.ID.Hex())
+}
+
 func (s *UserServiceImpl) CreateUser(ctx context.Context, user *model.User) error {
 	// Generate ObjectID if not set
 	if user.ID.IsZero() {
 		user.ID = primitive.NewObjectID()
 	}
+
+	// Hash the password before saving
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return errors.New("failed to hash password")
+	}
+	user.Password = string(hashedPassword)
+
 	return s.userRepo.CreateUser(ctx, user)
 }
 
@@ -109,4 +171,8 @@ func (s *UserServiceImpl) GetUserByID(ctx context.Context, id string) (model.Use
 
 func (s *UserServiceImpl) GetCreditByID(ctx context.Context, id string) (float64, error) {
 	return s.userRepo.GetCreditByID(ctx, id)
+}
+
+func (s *UserServiceImpl) GetByUsername(ctx context.Context, username string)(model.User, error){
+	return s.userRepo.GetByUsername(ctx, username)
 }

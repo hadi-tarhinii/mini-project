@@ -19,6 +19,7 @@ type UserRepository interface {
 	GetAll(ctx context.Context) ([]model.User, error)
 	GetUserByID(ctx context.Context, id string) (model.User, error)
 	GetCreditByID(ctx context.Context, id string) (float64, error)
+	GetByUsername(ctx context.Context, username string) (model.User, error)
 
 	//Clear User-related cache
 	ClearCache(ctx context.Context, id string)

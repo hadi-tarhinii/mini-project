@@ -181,7 +181,7 @@ func (r *UserRepositoryImpl) GetUserByID(ctx context.Context, id string) (model.
 
 		user = model.User{
 			ID:       objID,
-			Username: data["username"],
+			Username: data["username"],	
 			Email:    data["email"],
 			Credit:   balance,
 		}
@@ -205,6 +205,51 @@ func (r *UserRepositoryImpl) GetUserByID(ctx context.Context, id string) (model.
 		"id": user.ID.Hex(),
 		"username": user.Username,
 		"email": user.Email,
+		"credit": user.Credit,
+	}).Err()
+
+	if err != nil {
+		log.Printf("Failed to cache")
+	} else {
+		r.redisClient.Expire(ctx, key, 10*time.Minute)
+	}
+	return user, nil
+}
+
+func (r *UserRepositoryImpl) GetByUsername(ctx context.Context, username string)(model.User, error){
+	key := "user_name:" + username
+	var user model.User
+
+	data, err := r.redisClient.HGetAll(ctx, key).Result()
+
+	if err == nil && len(data) > 0 {
+		log.Printf("Redis Hit, user Username: %s", username)
+		objID, _ := primitive.ObjectIDFromHex(data["id"])
+		balance, _ := strconv.ParseFloat(data["credit"], 64)
+
+		user = model.User{
+			ID:       objID,
+			Username: data["username"],	
+			Email:    data["email"],
+			Password: data["password"],
+			Credit:   balance,
+		}
+		return user, nil
+	}
+	log.Printf("Redis miss, fetching %s from mongoDB", username)
+
+	err = r.collection.FindOne(ctx, bson.M{"username": username}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return user, errors.New("User not found")
+		}
+		return user, err
+	}
+	err = r.redisClient.HSet(ctx, key, map[string]interface{}{
+		"id": user.ID.Hex(),
+		"username": user.Username,
+		"email": user.Email,
+		"password": user.Password,
 		"credit": user.Credit,
 	}).Err()
 

@@ -11,10 +11,10 @@ var RDB *redis.Client
 
 
 
-func ConnectRedis() {
+func ConnectRedis(address string) {
     // FIX: Use redis.NewClient
     RDB = redis.NewClient(&redis.Options{
-        Addr: "localhost:6379",
+        Addr: address,
         Password: "", // no password set
         DB: 0,        // use default DB
     })
